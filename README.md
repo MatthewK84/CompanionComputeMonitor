@@ -1,8 +1,7 @@
 # Edge Telemetry Console
 
 Air-gap-ready fleet monitor for Raspberry Pi 5, NVIDIA Jetson Orin Nano, and
-Raspberry Pi Zero 2 W. React console (static bundle, zero runtime network
-dependencies) plus a Python-stdlib telemetry agent per device (zero pip).
+Raspberry Pi Zero 2 W. React console with a Python-stdlib telemetry agent per device.
 
 ```
 [Console host]  --HTTP poll GET /telemetry-->  [agent/device_agent.py on each node]
@@ -31,7 +30,7 @@ npm ci
 npm run dev        # SIM mode works immediately, no hardware needed
 ```
 
-## Release flow (connected side)
+## Release flow
 
 ```bash
 git tag v1.0.0
@@ -62,7 +61,7 @@ Every push to the connected branch redeploys automatically. Attach a custom
 domain in Railway settings if you want one.
 
 **LIVE mode from a Railway-hosted console:** the page is HTTPS, so browsers
-block polling plain `http://` LAN agents (mixed content), and LAN IPs are
+block polling plain `http://` LAN agents, and LAN IPs are
 not reachable from the internet anyway. Two working patterns:
 
 - Put the agents behind an HTTPS tunnel or reverse proxy (Tailscale Funnel,
@@ -71,7 +70,7 @@ not reachable from the internet anyway. Two working patterns:
 - Or treat the Railway deployment as the SIM-mode demo, and serve the same
   release bundle inside the enclave for live monitoring (see below).
 
-## Deploy (enclave side)
+## Deploy
 
 Serve the unzipped bundle from any static server:
 
@@ -79,7 +78,7 @@ Serve the unzipped bundle from any static server:
 python3 -m http.server 8080          # or nginx: root /opt/edge-console;
 ```
 
-Copy `device_agent.py` (included in the zip) to each node:
+Copy `device_agent.py` to each node:
 
 ```bash
 python3 device_agent.py --port 8090 --links MQTT CoT/TAK JSON/REST   # Pi 5
@@ -90,7 +89,7 @@ python3 device_agent.py --port 8090 --links CoT/TAK MQTT             # Pi Zero 2
 Open the console, tap CONNECT, flip nodes from SIM to LIVE, enter each
 node's IP and port.
 
-### systemd unit (recommended)
+### systemd unit
 
 ```ini
 # /etc/systemd/system/edge-agent.service
