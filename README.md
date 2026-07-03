@@ -1,8 +1,7 @@
 # Edge Telemetry Console
 
 Air-gap-ready fleet monitor for Raspberry Pi 5, NVIDIA Jetson Orin Nano, and
-Raspberry Pi Zero 2 W. React console (static bundle, zero runtime network
-dependencies) plus a Python-stdlib telemetry agent per device (zero pip).
+Raspberry Pi Zero 2 W. React console with a Python-stdlib telemetry agent per device with no pip requirement.
 
 ```
 [Console host]  --HTTP poll GET /telemetry-->  [agent/device_agent.py on each node]
@@ -32,7 +31,7 @@ npm ci
 npm run dev        # SIM mode works immediately, no hardware needed
 ```
 
-## Release flow (connected side)
+## Connected Side Release Flow
 
 ```bash
 git tag v1.0.0
@@ -48,7 +47,7 @@ your approved cross-domain transfer process; verify on the far side:
 sha256sum -c edge-telemetry-console-v1.0.0.zip.sha256
 ```
 
-## Deploy on Railway with ZeroTier (LIVE mode via bridge relay)
+## Deploy on Railway with ZeroTier Live with a Bridge Relay
 
 BLUF: Railway containers cannot join ZeroTier directly (`zerotier-one`
 needs `/dev/net/tun` and `NET_ADMIN`, which Railway does not grant, and the
@@ -110,7 +109,7 @@ directly (userspace mode is built into the image): set `TS_AUTHKEY` in
 Railway Variables and enter tailnet IPs in the drawer with no RELAY set.
 `entrypoint.sh` handles the rest.
 
-## Deploy (enclave side)
+## Enclave Side Deployment
 
 Serve the unzipped bundle from any static server:
 
@@ -118,7 +117,7 @@ Serve the unzipped bundle from any static server:
 python3 -m http.server 8080          # or nginx: root /opt/edge-console;
 ```
 
-Copy `device_agent.py` (included in the zip) to each node:
+Copy `device_agent.py` to each node:
 
 ```bash
 python3 device_agent.py --port 8090 --links MQTT CoT/TAK JSON/REST   # Pi 5
@@ -129,7 +128,7 @@ python3 device_agent.py --port 8090 --links CoT/TAK MQTT             # Pi Zero 2
 Open the console, tap CONNECT, flip nodes from SIM to LIVE, enter each
 node's IP and port.
 
-### systemd unit (recommended)
+### systemd unit
 
 ```ini
 # /etc/systemd/system/edge-agent.service
