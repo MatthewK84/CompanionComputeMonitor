@@ -350,27 +350,44 @@ function normalizeSample(raw, p) {
 }
 
 /**
- * Build the agent base URL. A bare host defaults to http:// (LAN enclave
- * case). A host entered with an explicit scheme (e.g. an HTTPS tunnel or
- * reverse proxy in front of the agent) is used as-is, which is required
- * when this console is itself served over HTTPS (e.g. Railway).
- * @param {DeviceConfig} cfg @returns {string}
+ * Build the telemetry URL for a device.
+ * - Relay base URL configured (ZeroTier/VPN bridge node running server.mjs,
+ *   typically exposed via an HTTPS tunnel): route through it at
+ *   <relayBase>/agent/<host>/<port>/telemetry.
+ * - Host entered with an explicit scheme (HTTPS tunnel/reverse proxy):
+ *   used as-is.
+ * - Page served over HTTPS (Railway): browsers block direct plain-HTTP
+ *   fetches to private IPs, so route through the same-origin relay at
+ *   /agent/<host>/<port>/telemetry (see server.mjs).
+ * - Page served over HTTP (enclave/local static hosting): direct fetch.
+ * @param {DeviceConfig} cfg @param {string} relayBase @returns {string}
  */
-function agentBaseUrl(cfg) {
+function buildTelemetryUrl(cfg, relayBase) {
   const hasScheme = cfg.host.startsWith("http://") || cfg.host.startsWith("https://");
-  const base = hasScheme ? cfg.host : `http://${cfg.host}`;
-  return `${base}:${cfg.port}`;
+  if (relayBase !== "" && !hasScheme) {
+    const base = relayBase.endsWith("/") ? relayBase.slice(0, -1) : relayBase;
+    return `${base}/agent/${encodeURIComponent(cfg.host)}/${cfg.port}/telemetry`;
+  }
+  if (hasScheme) {
+    return `${cfg.host}:${cfg.port}/telemetry`;
+  }
+  const pageIsHttps = typeof window !== "undefined" && window.location.protocol === "https:";
+  if (pageIsHttps) {
+    return `/agent/${encodeURIComponent(cfg.host)}/${cfg.port}/telemetry`;
+  }
+  return `http://${cfg.host}:${cfg.port}/telemetry`;
 }
 
 /**
  * Poll one device agent with a hard timeout.
- * @param {DeviceConfig} cfg @param {DeviceProfile} p @returns {Promise<Sample>}
+ * @param {DeviceConfig} cfg @param {DeviceProfile} p @param {string} relayBase
+ * @returns {Promise<Sample>}
  */
-async function fetchLiveSample(cfg, p) {
+async function fetchLiveSample(cfg, p, relayBase) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const url = `${agentBaseUrl(cfg)}/telemetry`;
+    const url = buildTelemetryUrl(cfg, relayBase);
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} from ${cfg.host}`);
@@ -524,6 +541,7 @@ function evaluateFaults(s, p, linkUp) {
           "Check the agent: systemctl status edge-agent  /  journalctl -u edge-agent -n 50",
           "Verify the port is open from this console's host: nc -vz <host> <port>",
           "On an air-gapped VLAN, confirm the switch port and any host firewall (nftables/iptables) allow the agent port",
+          "If this console is served over HTTPS, polls route via the /agent relay: check the server logs and confirm the device is on the tailnet (tailscale status)",
         ],
       },
     ];
@@ -1012,10 +1030,29 @@ function ConfigRow({ cfg, profile, onChange }) {
   );
 }
 
-function ConfigDrawer({ configs, onChange }) {
+function ConfigDrawer({ configs, onChange, relayBase, onRelayChange }) {
   return (
     <section style={{ background: T.panel, border: `1px solid ${T.edge}`, borderRadius: 4, padding: "10px 14px 4px" }}>
       <Micro color={T.ink}>Connections · LIVE polls GET /telemetry on each agent</Micro>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: `1px solid ${T.edgeSoft}` }}>
+        <span style={{ fontFamily: T.mono, fontSize: 12, color: T.ink, width: 90, flexShrink: 0 }}>RELAY</span>
+        <input
+          value={relayBase}
+          onChange={(e) => onRelayChange(e.target.value)}
+          placeholder="optional: bridge relay URL (ZeroTier/VPN node running server.mjs)"
+          style={{
+            fontFamily: T.mono,
+            fontSize: 12,
+            color: T.ink,
+            background: T.panelDeep,
+            border: `1px solid ${relayBase.trim() !== "" ? T.data : T.edge}`,
+            borderRadius: 3,
+            padding: "5px 8px",
+            flex: 1,
+            minWidth: 220,
+          }}
+        />
+      </div>
       <div style={{ marginTop: 4 }}>
         {configs.map((cfg) => (
           <ConfigRow
@@ -1027,8 +1064,9 @@ function ConfigDrawer({ configs, onChange }) {
         ))}
       </div>
       <p style={{ fontFamily: T.sans, fontSize: 11, color: T.dim, lineHeight: 1.5, margin: "8px 0" }}>
-        Air-gap note: this console makes no calls outside the hosts listed above. Agents are Python-stdlib only
-        (no pip). Serve this app as a static bundle from any LAN host.
+        Routing: with a RELAY set (a ZeroTier/VPN-joined node running server.mjs), LIVE polls route through
+        it to reach overlay IPs. Otherwise: over HTTP, direct polls; over HTTPS, polls use this app's
+        same-origin /agent relay. Agents are Python-stdlib only. No calls beyond the hosts above.
       </p>
     </section>
   );
@@ -1051,12 +1089,15 @@ function makeDefaultConfigs() {
 
 export default function EdgeTelemetryConsole() {
   const [configs, setConfigs] = useState(makeDefaultConfigs);
+  const [relayBase, setRelayBase] = useState("");
   const [showConfig, setShowConfig] = useState(false);
   const [frames, setFrames] = useState(() => new Map());
   const simStates = useRef(new Map());
   const histories = useRef(new Map());
   const configsRef = useRef(configs);
   configsRef.current = configs;
+  const relayBaseRef = useRef(relayBase);
+  relayBaseRef.current = relayBase;
 
   const pollOne = useCallback(async (cfg) => {
     const profile = profileById(cfg.profileId);
@@ -1069,7 +1110,7 @@ export default function EdgeTelemetryConsole() {
       return { sample: stepSim(sim, profile), linkUp: true };
     }
     try {
-      const sample = await fetchLiveSample(cfg, profile);
+      const sample = await fetchLiveSample(cfg, profile, relayBaseRef.current.trim());
       return { sample, linkUp: true };
     } catch (error) {
       console.error(`Poll failed for ${cfg.key}:`, error);
@@ -1180,6 +1221,8 @@ export default function EdgeTelemetryConsole() {
         {showConfig && (
           <ConfigDrawer
             configs={configs}
+            relayBase={relayBase}
+            onRelayChange={setRelayBase}
             onChange={(next) =>
               setConfigs((prev) => prev.map((c) => (c.key === next.key ? next : c)))
             }
