@@ -8,10 +8,16 @@ COPY src ./src
 COPY scripts ./scripts
 RUN npm run build && npm run verify:airgap
 
-# Stage 2: serve dist/ with nginx. Railway injects PORT; the template
-# mechanism in the official image substitutes it at container start.
-FROM nginx:1.27-alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+# Stage 2: Node server (static + same-origin agent relay) with Tailscale
+# binaries for reaching devices on a tailnet from Railway.
+FROM node:20-alpine
+RUN apk add --no-cache ca-certificates
+COPY --from=tailscale/tailscale:stable /usr/local/bin/tailscaled /usr/local/bin/tailscaled
+COPY --from=tailscale/tailscale:stable /usr/local/bin/tailscale /usr/local/bin/tailscale
+WORKDIR /app
+COPY --from=build /app/dist ./dist
+COPY server.mjs entrypoint.sh ./
+RUN mkdir -p /var/lib/tailscale
 ENV PORT=8080
 EXPOSE 8080
+CMD ["./entrypoint.sh"]

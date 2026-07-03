@@ -1,7 +1,8 @@
 # Edge Telemetry Console
 
 Air-gap-ready fleet monitor for Raspberry Pi 5, NVIDIA Jetson Orin Nano, and
-Raspberry Pi Zero 2 W. React console with a Python-stdlib telemetry agent per device.
+Raspberry Pi Zero 2 W. React console (static bundle, zero runtime network
+dependencies) plus a Python-stdlib telemetry agent per device (zero pip).
 
 ```
 [Console host]  --HTTP poll GET /telemetry-->  [agent/device_agent.py on each node]
@@ -16,9 +17,10 @@ src/EdgeTelemetryConsole.jsx   Console component (SIM + LIVE modes, fault board)
 src/main.jsx                   Vite entry
 agent/device_agent.py          Per-device telemetry agent (Python 3.10+, stdlib)
 scripts/verify-airgap.mjs      CI gate: fails if dist/ references external origins
-Dockerfile                     Multi-stage build -> nginx static serve (Railway-ready)
-nginx.conf.template            Listens on Railway's injected $PORT
-railway.json                   Railway build/deploy config
+server.mjs                     Node server: static bundle + same-origin /agent relay
+entrypoint.sh                  Joins the tailnet (TS_AUTHKEY) then starts the server
+Dockerfile                     Build stage + Node/Tailscale runtime (Railway-ready)
+railway.json                   Railway build/deploy config (healthcheck /healthz)
 .github/workflows/release.yml  Tag -> build -> verify -> zip + sha256 on a Release
 .github/workflows/pages-demo.yml  Optional SIM-mode demo on GitHub Pages
 ```
@@ -30,7 +32,7 @@ npm ci
 npm run dev        # SIM mode works immediately, no hardware needed
 ```
 
-## Release flow
+## Release flow (connected side)
 
 ```bash
 git tag v1.0.0
@@ -46,31 +48,69 @@ your approved cross-domain transfer process; verify on the far side:
 sha256sum -c edge-telemetry-console-v1.0.0.zip.sha256
 ```
 
-## Deploy on Railway
+## Deploy on Railway with ZeroTier (LIVE mode via bridge relay)
 
-The repo ships a multi-stage `Dockerfile` and `railway.json`, so deployment
-is connect-and-go:
+BLUF: Railway containers cannot join ZeroTier directly (`zerotier-one`
+needs `/dev/net/tun` and `NET_ADMIN`, which Railway does not grant, and the
+userspace libzt Node bindings are unmaintained). Instead, one
+ZeroTier-joined node runs this repo's `server.mjs` as a bridge relay, and
+the Railway-hosted console routes LIVE polls through it.
 
-1. Push this repo to GitHub.
-2. In Railway: New Project -> Deploy from GitHub repo -> select it.
-3. Railway detects the Dockerfile, builds (the air-gap gate runs inside the
-   build and fails the deploy if the bundle picks up an external origin),
-   and serves the console on your `*.up.railway.app` domain.
+```
+[Browser] --HTTPS--> [Railway: console UI]
+[Browser] --HTTPS--> [tunnel URL] --> [bridge node on ZeroTier: server.mjs]
+                                          --HTTP--> device ZeroTier IPs
+```
 
-Every push to the connected branch redeploys automatically. Attach a custom
-domain in Railway settings if you want one.
+Steps:
 
-**LIVE mode from a Railway-hosted console:** the page is HTTPS, so browsers
-block polling plain `http://` LAN agents, and LAN IPs are
-not reachable from the internet anyway. Two working patterns:
+1. Deploy the repo to Railway as before (UI hosting only; no TS_AUTHKEY
+   needed).
+2. Join each device to your ZeroTier network: `sudo zerotier-cli join
+   <network-id>`, authorize in ZeroTier Central, note each managed IP
+   (`sudo zerotier-cli listnetworks`). ZeroTier's default pools are all
+   RFC 1918, so the relay allowlist already covers them.
+3. Pick a bridge node on the same ZeroTier network (one of the Pis works;
+   an always-on host is better). Copy `server.mjs` to it and run:
+   `PORT=8082 node server.mjs` (Node 20+, no npm install needed). Without
+   a `dist/` folder it runs relay-only and reports `"ui": false` on
+   `/healthz`.
+4. Expose the bridge over HTTPS with an outbound-only tunnel:
+   `cloudflared tunnel --url http://localhost:8082` (or a named tunnel /
+   Tailscale Funnel / nginx with a cert). Copy the HTTPS URL it prints.
+5. In the console's CONNECT drawer, paste that URL into the RELAY field,
+   flip devices to LIVE, and enter each device's ZeroTier IP and port 8090.
 
-- Put the agents behind an HTTPS tunnel or reverse proxy (Tailscale Funnel,
-  cloudflared, or nginx with a cert) and enter the full URL in the CONNECT
-  drawer -- hosts with an explicit `https://` scheme are used as-is.
-- Or treat the Railway deployment as the SIM-mode demo, and serve the same
-  release bundle inside the enclave for live monitoring (see below).
+Verify end-to-end before the UI:
 
-## Deploy
+```bash
+curl https://<bridge-tunnel-url>/healthz
+# {"ok":true,"relay":"direct","ui":false}
+curl https://<bridge-tunnel-url>/agent/<zt-device-ip>/8090/healthz
+# {"ok":true}
+```
+
+Bridge hardening: the relay forwards only GET, only to RFC 1918 addresses,
+only to `/telemetry` and `/healthz`. Set `CORS_ORIGIN` on the bridge to
+your Railway origin (default `*`), and use ZeroTier flow rules to restrict
+the bridge to port 8090 on device members.
+
+**Simpler alternative if your browsing devices can join ZeroTier:** skip
+the bridge entirely. Serve the built bundle from any ZeroTier node over
+plain HTTP (`python3 -m http.server 8080 --directory dist`), join your
+laptop/phone to the network (ZeroTier has iOS/Android clients), and open
+`http://<zt-ip>:8080`. Over HTTP the console polls devices directly -- no
+relay, no tunnel, no Railway dependency for LIVE. Keep Railway as the
+public SIM demo.
+
+### Tailscale variant
+
+If you ever switch to Tailscale, the container CAN join the tailnet
+directly (userspace mode is built into the image): set `TS_AUTHKEY` in
+Railway Variables and enter tailnet IPs in the drawer with no RELAY set.
+`entrypoint.sh` handles the rest.
+
+## Deploy (enclave side)
 
 Serve the unzipped bundle from any static server:
 
@@ -78,7 +118,7 @@ Serve the unzipped bundle from any static server:
 python3 -m http.server 8080          # or nginx: root /opt/edge-console;
 ```
 
-Copy `device_agent.py` to each node:
+Copy `device_agent.py` (included in the zip) to each node:
 
 ```bash
 python3 device_agent.py --port 8090 --links MQTT CoT/TAK JSON/REST   # Pi 5
@@ -89,7 +129,7 @@ python3 device_agent.py --port 8090 --links CoT/TAK MQTT             # Pi Zero 2
 Open the console, tap CONNECT, flip nodes from SIM to LIVE, enter each
 node's IP and port.
 
-### systemd unit
+### systemd unit (recommended)
 
 ```ini
 # /etc/systemd/system/edge-agent.service
