@@ -17,7 +17,11 @@ COPY --from=tailscale/tailscale:stable /usr/local/bin/tailscale /usr/local/bin/t
 WORKDIR /app
 COPY --from=build /app/dist ./dist
 COPY server.mjs entrypoint.sh ./
-RUN mkdir -p /var/lib/tailscale
+# Re-assert the exec bit (lost by some zip/Windows/git paths) AND invoke via
+# sh explicitly: the node image's entrypoint wrapper prepends `node` to any
+# CMD it cannot resolve as an executable, which would parse this shell
+# script as JavaScript.
+RUN chmod +x /app/entrypoint.sh && mkdir -p /var/lib/tailscale
 ENV PORT=8080
 EXPOSE 8080
-CMD ["./entrypoint.sh"]
+CMD ["/bin/sh", "/app/entrypoint.sh"]
